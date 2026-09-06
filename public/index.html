@@ -54,9 +54,23 @@
       <span class="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-mono">
         v1alpha
       </span>
+
+      <!-- Top Left: API Calls in Last 60 Seconds Indicator -->
+      <div class="ml-4 flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-slate-800/80 border border-slate-700 text-xs font-mono text-slate-300">
+        <span class="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
+        <span>API (60s):</span>
+        <span id="topApiCount60s" class="font-bold text-blue-400">0</span>
+        <span class="text-slate-500">reqs</span>
+      </div>
     </div>
 
     <div class="flex items-center space-x-3">
+      <!-- Total API Call Counter -->
+      <div class="hidden sm:flex items-center space-x-1.5 text-xs text-slate-400 font-mono px-2.5 py-1 bg-slate-950/60 rounded border border-slate-800">
+        <span>Total Calls:</span>
+        <span id="topTotalApiCount" class="text-slate-200 font-bold">0</span>
+      </div>
+
       <!-- API Key indicator -->
       <button id="apiKeyStatusBtn" class="flex items-center space-x-2 text-xs px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 transition border border-slate-700">
         <span id="apiKeyDot" class="w-2 h-2 rounded-full bg-amber-500"></span>
@@ -77,9 +91,13 @@
     <aside class="w-80 border-r border-slate-800 bg-slate-900/50 flex flex-col shrink-0">
       <div class="p-3 border-b border-slate-800 flex items-center justify-between">
         <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Sessions</span>
-        <button id="btnRefreshSessions" title="Refresh Sessions" class="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition">
-          <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
-        </button>
+        <div class="flex items-center space-x-2">
+          <!-- Sidebar Reload Counter -->
+          <span id="sidebarReloadCount" class="text-[10px] font-mono text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">0</span>
+          <button id="btnRefreshSessions" title="Reload Sessions from API" class="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
       </div>
 
       <!-- Sessions Search Input -->
@@ -92,7 +110,6 @@
 
       <!-- Sessions List Container -->
       <div id="sessionsList" class="flex-1 overflow-y-auto divide-y divide-slate-800/40">
-        <!-- JS will populate sessions here -->
         <div class="p-4 text-center text-xs text-slate-500">
           Loading sessions...
         </div>
@@ -119,10 +136,9 @@
       <!-- Active Session View -->
       <div id="activeSessionView" class="hidden flex-1 flex flex-col overflow-hidden">
         <!-- Session Header Bar -->
-        <div class="px-6 py-3.5 border-b border-slate-800 bg-slate-900/40 flex items-center justify-between shrink-0">
+        <div class="px-6 py-3 border-b border-slate-800 bg-slate-900/40 flex items-center justify-between shrink-0">
           <div class="flex items-center space-x-3 overflow-hidden">
             <div id="sessionStateBadge" class="px-2.5 py-1 rounded-full text-xs font-mono font-medium flex items-center space-x-1.5">
-              <!-- JS Populated badge -->
             </div>
             <div class="truncate">
               <h1 id="sessionTitle" class="text-base font-semibold text-slate-100 truncate">
@@ -139,13 +155,42 @@
             </div>
           </div>
 
-          <div class="flex items-center space-x-2">
-            <button id="btnRefreshActivities" title="Refresh Feed" class="p-2 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 transition">
+          <div class="flex items-center space-x-3">
+            <!-- Session Reload Call Counter -->
+            <div class="flex items-center space-x-1 px-2 py-1 rounded bg-slate-900 border border-slate-800 text-xs font-mono text-slate-400">
+              <span>Fetched:</span>
+              <span id="chatReloadCount" class="text-blue-400 font-bold">0</span>
+            </div>
+
+            <button id="btnRefreshActivities" title="Reload Chat & Activities from API" class="p-2 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 transition flex items-center space-x-1">
               <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+              <span class="text-xs">Reload Chat</span>
             </button>
             <button id="btnDeleteSession" title="Delete Session" class="p-2 rounded-md bg-slate-900 hover:bg-red-950/50 hover:border-red-800/50 border border-slate-800 text-slate-400 hover:text-red-400 transition">
               <i data-lucide="trash-2" class="w-4 h-4"></i>
             </button>
+          </div>
+        </div>
+
+        <!-- View Tab Selector: Chat & Plans vs Progress & Logs -->
+        <div class="px-6 py-2 border-b border-slate-800/80 bg-slate-900/20 flex items-center justify-between shrink-0">
+          <div class="flex items-center space-x-2">
+            <button id="tabChat" class="px-3 py-1 rounded-md text-xs font-medium bg-blue-600 text-white transition flex items-center space-x-1.5">
+              <i data-lucide="message-square" class="w-3.5 h-3.5"></i>
+              <span>Chat & Plans</span>
+              <span id="badgeChatCount" class="ml-1 px-1.5 py-0.2 rounded-full bg-blue-800 text-[10px] font-mono">0</span>
+            </button>
+            <button id="tabProgress" class="px-3 py-1 rounded-md text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 transition flex items-center space-x-1.5">
+              <i data-lucide="activity" class="w-3.5 h-3.5"></i>
+              <span>Progress & Logs</span>
+              <span id="badgeProgressCount" class="ml-1 px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] font-mono">0</span>
+            </button>
+          </div>
+
+          <div class="text-[11px] text-slate-500 font-mono flex items-center space-x-2">
+            <span id="cacheStatusBadge" class="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              Loaded from Cache
+            </span>
           </div>
         </div>
 
@@ -163,7 +208,6 @@
 
         <!-- Activities Feed Container -->
         <div id="activitiesFeed" class="flex-1 overflow-y-auto p-6 space-y-6">
-          <!-- JS will render activities here -->
         </div>
 
         <!-- Session Input Bar -->
@@ -175,7 +219,7 @@
             </button>
           </form>
           <div class="flex items-center justify-between mt-2 text-[11px] text-slate-500 px-1">
-            <span id="pollingStatusText">Auto-refreshing every 5s during active tasks</span>
+            <span id="pollingStatusText">Chat loaded from client cache. Press 'Reload Chat' to refresh from API.</span>
             <span>Jules REST API Client</span>
           </div>
         </div>

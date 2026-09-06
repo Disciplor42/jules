@@ -1,18 +1,29 @@
-// State Management
+// State Management & Client Cache
 const state = {
   apiKey: localStorage.getItem('jules_api_key') || '',
   sessions: [],
   sources: [],
   selectedSessionId: null,
   activeSession: null,
-  activities: [],
-  lastActivityTimestamp: null,
-  pollInterval: null,
-  isPolling: false
+  activeTab: 'chat', // 'chat' or 'progress'
+
+  // Cache objects mapping IDs to data
+  sessionCache: {},      // sessionId -> session object
+  activitiesCache: {},   // sessionId -> array of activities
+  reloadCallCounts: {},  // sessionId -> fetch count
+
+  // Global API Metrics
+  apiCallTimestamps: [],
+  totalApiCallCount: 0,
+  sidebarReloadCount: 0
 };
 
 // DOM Elements
 const elements = {
+  topApiCount60s: document.getElementById('topApiCount60s'),
+  topTotalApiCount: document.getElementById('topTotalApiCount'),
+  sidebarReloadCount: document.getElementById('sidebarReloadCount'),
+
   apiKeyStatusBtn: document.getElementById('apiKeyStatusBtn'),
   apiKeyDot: document.getElementById('apiKeyDot'),
   apiKeyText: document.getElementById('apiKeyText'),
@@ -46,8 +57,15 @@ const elements = {
   sessionTitle: document.getElementById('sessionTitle'),
   sessionSourceText: document.getElementById('sessionSourceText'),
   sessionIdText: document.getElementById('sessionIdText'),
+  chatReloadCount: document.getElementById('chatReloadCount'),
   btnRefreshActivities: document.getElementById('btnRefreshActivities'),
   btnDeleteSession: document.getElementById('btnDeleteSession'),
+
+  tabChat: document.getElementById('tabChat'),
+  tabProgress: document.getElementById('tabProgress'),
+  badgeChatCount: document.getElementById('badgeChatCount'),
+  badgeProgressCount: document.getElementById('badgeProgressCount'),
+  cacheStatusBadge: document.getElementById('cacheStatusBadge'),
 
   sessionPrBanner: document.getElementById('sessionPrBanner'),
   sessionPrTitle: document.getElementById('sessionPrTitle'),
@@ -60,7 +78,31 @@ const elements = {
   pollingStatusText: document.getElementById('pollingStatusText')
 };
 
-// Helper: Headers
+// API Tracker & Fetch Helper
+function trackApiCall() {
+  const now = Date.now();
+  state.apiCallTimestamps.push(now);
+  state.totalApiCallCount++;
+  updateApiCallMetrics();
+}
+
+function updateApiCallMetrics() {
+  const now = Date.now();
+  const sixtySecsAgo = now - 60000;
+  // Filter timestamps within last 60 seconds
+  state.apiCallTimestamps = state.apiCallTimestamps.filter(t => t >= sixtySecsAgo);
+
+  if (elements.topApiCount60s) {
+    elements.topApiCount60s.innerText = state.apiCallTimestamps.length;
+  }
+  if (elements.topTotalApiCount) {
+    elements.topTotalApiCount.innerText = state.totalApiCallCount;
+  }
+}
+
+// Periodically update the 60s counter so it drops back to 0 automatically
+setInterval(updateApiCallMetrics, 2000);
+
 function getHeaders() {
   return {
     'Content-Type': 'application/json',
@@ -68,8 +110,8 @@ function getHeaders() {
   };
 }
 
-// API Calls
 async function apiFetch(endpoint, options = {}) {
+  trackApiCall();
   const headers = { ...getHeaders(), ...(options.headers || {}) };
   const res = await fetch(endpoint, { ...options, headers });
   if (!res.ok) {
@@ -87,7 +129,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (state.apiKey) {
     loadSources();
-    loadSessions();
+    loadSessionsInitial();
   } else {
     showApiKeyModal();
   }
@@ -107,18 +149,44 @@ function setupEventListeners() {
 
   elements.selectSource.addEventListener('change', handleSourceChange);
 
-  elements.btnRefreshSessions.addEventListener('click', () => loadSessions(true));
+  // Reload sessions explicitly on sidebar refresh button click
+  elements.btnRefreshSessions.addEventListener('click', () => {
+    state.sidebarReloadCount++;
+    if (elements.sidebarReloadCount) elements.sidebarReloadCount.innerText = state.sidebarReloadCount;
+    fetchAndCacheSessions(true);
+  });
+
   elements.sessionSearch.addEventListener('input', renderSessionsList);
 
+  // Reload activities explicitly when side reload chat button is pressed
   elements.btnRefreshActivities.addEventListener('click', () => {
-    if (state.selectedSessionId) loadActivities(state.selectedSessionId, true);
+    if (state.selectedSessionId) {
+      state.reloadCallCounts[state.selectedSessionId] = (state.reloadCallCounts[state.selectedSessionId] || 0) + 1;
+      fetchAndCacheActivities(state.selectedSessionId, true);
+    }
   });
 
   elements.btnDeleteSession.addEventListener('click', handleDeleteSession);
   elements.sendMessageForm.addEventListener('submit', handleSendMessage);
+
+  // Tabs
+  elements.tabChat.addEventListener('click', () => switchTab('chat'));
+  elements.tabProgress.addEventListener('click', () => switchTab('progress'));
 }
 
-// API Key Modal Handling
+function switchTab(tabName) {
+  state.activeTab = tabName;
+  if (tabName === 'chat') {
+    elements.tabChat.className = 'px-3 py-1 rounded-md text-xs font-medium bg-blue-600 text-white transition flex items-center space-x-1.5';
+    elements.tabProgress.className = 'px-3 py-1 rounded-md text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 transition flex items-center space-x-1.5';
+  } else {
+    elements.tabProgress.className = 'px-3 py-1 rounded-md text-xs font-medium bg-blue-600 text-white transition flex items-center space-x-1.5';
+    elements.tabChat.className = 'px-3 py-1 rounded-md text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 transition flex items-center space-x-1.5';
+  }
+  renderActivities();
+}
+
+// API Key UI
 function updateApiKeyUI() {
   if (state.apiKey) {
     elements.apiKeyDot.className = 'w-2 h-2 rounded-full bg-emerald-500';
@@ -151,7 +219,7 @@ async function handleApiKeySubmit(e) {
 
   try {
     await loadSources();
-    await loadSessions();
+    await loadSessionsInitial();
     hideApiKeyModal();
   } catch (err) {
     elements.apiKeyError.innerText = `Validation Error: ${err.message}`;
@@ -159,7 +227,7 @@ async function handleApiKeySubmit(e) {
   }
 }
 
-// Load Sources
+// Sources
 async function loadSources() {
   try {
     const data = await apiFetch('/api/sources');
@@ -211,15 +279,13 @@ function handleSourceChange() {
   }
 }
 
-// New Session Handling
+// New Session
 function showNewSessionModal() {
   if (!state.apiKey) {
     showApiKeyModal();
     return;
   }
-  if (state.sources.length === 0) {
-    loadSources();
-  }
+  if (state.sources.length === 0) loadSources();
   elements.newSessionModal.classList.remove('hidden');
 }
 
@@ -248,9 +314,7 @@ async function handleCreateSession(e) {
       title,
       sourceContext: {
         source: sourceName,
-        githubRepoContext: {
-          startingBranch: branch
-        }
+        githubRepoContext: { startingBranch: branch }
       },
       automationMode,
       requirePlanApproval
@@ -261,10 +325,18 @@ async function handleCreateSession(e) {
       body: JSON.stringify(payload)
     });
 
+    const sessionId = newSession.id || (newSession.name ? newSession.name.split('/').pop() : null);
+
+    // Cache the new session
+    if (sessionId) {
+      state.sessionCache[sessionId] = newSession;
+      state.activitiesCache[sessionId] = [];
+    }
+
     hideNewSessionModal();
     elements.createSessionForm.reset();
-    await loadSessions();
-    selectSession(newSession.id || (newSession.name ? newSession.name.split('/').pop() : null));
+    await fetchAndCacheSessions(true);
+    selectSession(sessionId);
   } catch (err) {
     alert(`Failed to create session: ${err.message}`);
   } finally {
@@ -273,12 +345,27 @@ async function handleCreateSession(e) {
   }
 }
 
-// Sessions Management
-async function loadSessions(manual = false) {
+// Load Sessions Logic
+async function loadSessionsInitial() {
+  if (state.sessions.length > 0) {
+    renderSessionsList();
+    return;
+  }
+  await fetchAndCacheSessions(false);
+}
+
+async function fetchAndCacheSessions(isReload = false) {
   try {
-    if (manual) elements.btnRefreshSessions.classList.add('animate-spin');
+    if (isReload) elements.btnRefreshSessions.classList.add('animate-spin');
     const data = await apiFetch('/api/sessions?pageSize=50');
     state.sessions = data.sessions || [];
+
+    // Cache all sessions
+    state.sessions.forEach(s => {
+      const id = s.id || (s.name ? s.name.split('/').pop() : '');
+      if (id) state.sessionCache[id] = s;
+    });
+
     renderSessionsList();
   } catch (err) {
     console.error('Error loading sessions:', err);
@@ -336,28 +423,45 @@ function renderSessionsList() {
   });
 }
 
-// Select Session
+// Select Session (Using Cache First!)
 async function selectSession(sessionId) {
   if (!sessionId) return;
   state.selectedSessionId = sessionId;
-  state.lastActivityTimestamp = null;
-  state.activities = [];
 
   renderSessionsList();
 
   elements.noSessionView.classList.add('hidden');
   elements.activeSessionView.classList.remove('hidden');
 
-  // Load Session Details & Activities
-  await fetchSessionDetails(sessionId);
-  await loadActivities(sessionId);
+  // Update session reload counter display
+  if (elements.chatReloadCount) {
+    elements.chatReloadCount.innerText = state.reloadCallCounts[sessionId] || 0;
+  }
 
-  startPolling();
+  // 1. Get Session from Cache or Fetch
+  if (state.sessionCache[sessionId]) {
+    state.activeSession = state.sessionCache[sessionId];
+    renderSessionHeader(state.activeSession);
+  } else {
+    await fetchSessionDetails(sessionId);
+  }
+
+  // 2. Get Activities from Cache or Fetch
+  if (state.activitiesCache[sessionId]) {
+    elements.cacheStatusBadge.innerText = 'Loaded from Client Cache';
+    elements.cacheStatusBadge.className = 'px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+    renderActivities();
+  } else {
+    elements.cacheStatusBadge.innerText = 'Fetching from API...';
+    elements.cacheStatusBadge.className = 'px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20';
+    await fetchAndCacheActivities(sessionId, false);
+  }
 }
 
 async function fetchSessionDetails(sessionId) {
   try {
     const session = await apiFetch(`/api/sessions/${sessionId}`);
+    state.sessionCache[sessionId] = session;
     state.activeSession = session;
     renderSessionHeader(session);
   } catch (err) {
@@ -371,7 +475,6 @@ function renderSessionHeader(session) {
   elements.sessionSourceText.innerText = session.sourceContext?.source || 'No source';
   elements.sessionIdText.innerText = `id: ${session.id || session.name}`;
 
-  // Check outputs for PR
   if (session.outputs && session.outputs.length > 0) {
     const prOutput = session.outputs.find(o => o.pullRequest);
     if (prOutput) {
@@ -393,75 +496,74 @@ async function handleDeleteSession() {
 
   try {
     await apiFetch(`/api/sessions/${state.selectedSessionId}`, { method: 'DELETE' });
-    stopPolling();
+    delete state.sessionCache[state.selectedSessionId];
+    delete state.activitiesCache[state.selectedSessionId];
     state.selectedSessionId = null;
     state.activeSession = null;
     elements.activeSessionView.classList.add('hidden');
     elements.noSessionView.classList.remove('hidden');
-    await loadSessions();
+    await fetchAndCacheSessions(true);
   } catch (err) {
     alert(`Failed to delete session: ${err.message}`);
   }
 }
 
-// Activities Handling
-async function loadActivities(sessionId, manual = false) {
+// Fetch & Cache Activities
+async function fetchAndCacheActivities(sessionId, isExplicitReload = false) {
   try {
-    if (manual) elements.btnRefreshActivities.classList.add('animate-spin');
+    if (isExplicitReload) elements.btnRefreshActivities.classList.add('animate-spin');
 
-    let url = `/api/sessions/${sessionId}/activities?pageSize=100`;
-    if (state.lastActivityTimestamp && !manual) {
-      url += `&createTime=${state.lastActivityTimestamp}`;
+    const data = await apiFetch(`/api/sessions/${sessionId}/activities?pageSize=100`);
+    state.activitiesCache[sessionId] = data.activities || [];
+
+    if (elements.chatReloadCount) {
+      elements.chatReloadCount.innerText = state.reloadCallCounts[sessionId] || 0;
     }
 
-    const data = await apiFetch(url);
-    const newActivities = data.activities || [];
-
-    if (manual || !state.lastActivityTimestamp) {
-      state.activities = newActivities;
-    } else if (newActivities.length > 0) {
-      // Append non-duplicate activities
-      const existingIds = new Set(state.activities.map(a => a.id || a.name));
-      newActivities.forEach(act => {
-        const id = act.id || act.name;
-        if (!existingIds.has(id)) {
-          state.activities.push(act);
-        }
-      });
-    }
-
-    if (state.activities.length > 0) {
-      const latest = state.activities[state.activities.length - 1];
-      if (latest.createTime) {
-        state.lastActivityTimestamp = latest.createTime;
-      }
-    }
+    elements.cacheStatusBadge.innerText = isExplicitReload ? 'Reloaded from API' : 'Cached';
+    elements.cacheStatusBadge.className = 'px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
 
     renderActivities();
   } catch (err) {
-    console.error('Error loading activities:', err);
+    console.error('Error fetching activities:', err);
   } finally {
     elements.btnRefreshActivities.classList.remove('animate-spin');
   }
 }
 
+// Render Activities with Split Tab Views
 function renderActivities() {
+  const sessionId = state.selectedSessionId;
+  const allActivities = state.activitiesCache[sessionId] || [];
+
+  // Filter activities into Chat & Plans vs Progress & Logs
+  const chatActivities = allActivities.filter(a =>
+    a.planGenerated || a.planApproved || a.userMessaged || a.agentMessaged || a.sessionCompleted || a.sessionFailed
+  );
+
+  const progressActivities = allActivities.filter(a =>
+    a.progressUpdated || (a.artifacts && a.artifacts.length > 0) || (!a.planGenerated && !a.planApproved && !a.userMessaged && !a.agentMessaged)
+  );
+
+  elements.badgeChatCount.innerText = chatActivities.length;
+  elements.badgeProgressCount.innerText = progressActivities.length;
+
+  const currentList = state.activeTab === 'chat' ? chatActivities : progressActivities;
+
   elements.activitiesFeed.innerHTML = '';
 
-  if (state.activities.length === 0) {
+  if (currentList.length === 0) {
     elements.activitiesFeed.innerHTML = `
       <div class="text-center py-12 text-slate-500 text-xs">
-        No activities recorded yet for this session.
+        No ${state.activeTab === 'chat' ? 'chat or plan' : 'progress or log'} items in this session cache.
       </div>
     `;
     return;
   }
 
-  state.activities.forEach(activity => {
+  currentList.forEach(activity => {
     const actCard = createActivityElement(activity);
-    if (actCard) {
-      elements.activitiesFeed.appendChild(actCard);
-    }
+    if (actCard) elements.activitiesFeed.appendChild(actCard);
   });
 
   lucide.createIcons();
@@ -473,9 +575,7 @@ function createActivityElement(act) {
   card.className = 'bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm space-y-3';
 
   const headerTime = formatDate(act.createTime);
-  const originator = act.originator || 'system';
 
-  // Determine Activity Content
   if (act.planGenerated) {
     const plan = act.planGenerated.plan;
     card.innerHTML = `
@@ -559,7 +659,6 @@ function createActivityElement(act) {
       <div class="text-xs text-red-300 pl-7">${escapeHtml(act.sessionFailed.reason || 'Unknown error')}</div>
     `;
   } else {
-    // Default description
     card.innerHTML = `
       <div class="flex items-center justify-between text-xs text-slate-400">
         <span class="font-semibold text-slate-300">${escapeHtml(act.description || 'Activity')}</span>
@@ -568,7 +667,7 @@ function createActivityElement(act) {
     `;
   }
 
-  // Render Artifacts if present
+  // Render Artifacts
   if (act.artifacts && act.artifacts.length > 0) {
     const artContainer = document.createElement('div');
     artContainer.className = 'mt-3 pt-3 border-t border-slate-800/80 space-y-3';
@@ -588,7 +687,7 @@ function createActivityElement(act) {
     card.appendChild(artContainer);
   }
 
-  // Action buttons for state (e.g. Approve Plan button)
+  // Approve plan action
   if (act.planGenerated && state.activeSession?.state === 'AWAITING_PLAN_APPROVAL') {
     const approveDiv = document.createElement('div');
     approveDiv.className = 'pt-3 border-t border-slate-800 flex justify-end';
@@ -604,7 +703,6 @@ function createActivityElement(act) {
   return card;
 }
 
-// Render Plan Steps
 function renderPlanSteps(steps) {
   if (!steps || steps.length === 0) return '<div class="text-xs text-slate-500">No steps detailed.</div>';
 
@@ -621,7 +719,6 @@ function renderPlanSteps(steps) {
   `).join('');
 }
 
-// Render Artifact Components
 function renderGitPatch(gitPatch) {
   const div = document.createElement('div');
   div.className = 'bg-slate-950 border border-slate-800 rounded-lg overflow-hidden';
@@ -699,8 +796,7 @@ async function approvePlan() {
       method: 'POST',
       body: JSON.stringify({})
     });
-    await fetchSessionDetails(state.selectedSessionId);
-    await loadActivities(state.selectedSessionId, true);
+    await fetchAndCacheActivities(state.selectedSessionId, true);
   } catch (err) {
     alert(`Failed to approve plan: ${err.message}`);
   }
@@ -720,37 +816,23 @@ async function handleSendMessage(e) {
       body: JSON.stringify({ prompt: msg })
     });
 
-    // Optimistically load activities
-    await loadActivities(state.selectedSessionId, true);
+    // Add optimistic user message to cache
+    const userAct = {
+      id: 'opt_' + Date.now(),
+      originator: 'user',
+      createTime: new Date().toISOString(),
+      userMessaged: { userMessage: msg }
+    };
+
+    if (!state.activitiesCache[state.selectedSessionId]) {
+      state.activitiesCache[state.selectedSessionId] = [];
+    }
+    state.activitiesCache[state.selectedSessionId].push(userAct);
+    renderActivities();
   } catch (err) {
     alert(`Failed to send message: ${err.message}`);
   } finally {
     elements.btnSendMessage.disabled = false;
-  }
-}
-
-// Non-Spam Polling Strategy
-function startPolling() {
-  stopPolling();
-  state.isPolling = true;
-
-  // Poll every 5 seconds only when session is active
-  state.pollInterval = setInterval(async () => {
-    if (!state.selectedSessionId || !state.isPolling) return;
-
-    const activeStates = ['QUEUED', 'PLANNING', 'IN_PROGRESS', 'AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK'];
-    if (state.activeSession && activeStates.includes(state.activeSession.state)) {
-      await fetchSessionDetails(state.selectedSessionId);
-      await loadActivities(state.selectedSessionId);
-    }
-  }, 5000);
-}
-
-function stopPolling() {
-  state.isPolling = false;
-  if (state.pollInterval) {
-    clearInterval(state.pollInterval);
-    state.pollInterval = null;
   }
 }
 
